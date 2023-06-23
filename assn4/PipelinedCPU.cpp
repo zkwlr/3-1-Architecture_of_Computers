@@ -44,18 +44,31 @@ void PipelinedCPU::InstructionDecode()
   // readData1, readData2에 현재 register에 저장된 값 저장, Writedata는 하지 않으므로 관련 port와 signal은 nullptr
   m_registerFile->access(&rs, &rt, nullptr, nullptr, nullptr, &m_latch_ID_EX.readData1, &m_latch_ID_EX.readData2);
   SignExtend<16, 32>(&immediate, &m_latch_ID_EX.immediate);
-  m_latch_ID_EX.instr_20_16 = rt; // rt값과 rd값중 뭐가 Writereg인지 결정하는 Mux가 EX stage에 있으므로 넘겨줘야함
+  m_latch_ID_EX.instr_25_21 = rs; // IF/ID stage를 실행중인 명령(data forwarding을 받을 명령)의 rs값을 forwarding unit이 받아야 하므로 latch에 추가로 저장
+  m_latch_ID_EX.instr_20_16 = rt; // rt값과 rd값중 뭐가 Writereg인지 결정하는 Mux가 EX stage에 있으므로 넘겨줘야함, 또한 rs와 같은 이유로 forwarding unit에 넘겨줘야함
   m_latch_ID_EX.instr_15_11 = rd; // WB 단계에서 rd(Write Register)에 WB 해줘야 하므로 latch에 저장해서 다음으로 넘김
 }
 
 void PipelinedCPU::Execute()
 {
   // 3. EX : Figure 4.51의 아랫 부분부터 구현
+  // 3-to-1 MUX를 위한 forwarding signal 생성, MUX에서 결정된 rs, rt 값 저장할 변수 생성
+  std::bitset<2> forwardA;
+  std::bitset<2> forwardB;
+  std::bitset<32> forwarded_rsValue;
+  std::bitset<32> forwarded_rtValue;
+  // Data forwarding unit 생성, forwarding signal 생성
+  ForwardingUnit(&m_latch_ID_EX.instr_25_21, &m_latch_ID_EX.instr_20_16, &m_latch_EX_MEM.ctrlWBRegWrite,
+                 &m_latch_EX_MEM.rd, &m_latch_MEM_WB.ctrlWBRegWrite, &m_latch_MEM_WB.rd, &forwardA, &forwardB);
+  // ID/EX의 rs Data forwarding을 위한 3-to-1 MUX, forwardA signal 받음
+  Mux<32>(&m_latch_ID_EX.readData1, &m_WB_to_FwdUnit_rdValue, &m_MEM_to_FwdUnit_rdValue, &forwardA, &forwarded_rsValue);
+  // ID/EX의 rt Data forwarding을 위한 3-to-1 MUX, forwardB signal 받음
+  Mux<32>(&m_latch_ID_EX.readData2, &m_WB_to_FwdUnit_rdValue, &m_MEM_to_FwdUnit_rdValue, &forwardB, &forwarded_rtValue);
   CPU::Mux<5>(&m_latch_ID_EX.instr_20_16, &m_latch_ID_EX.instr_15_11,
               &m_latch_ID_EX.ctrlEXRegDst, &m_latch_EX_MEM.rd); // EX stage의 맨 아래 MUX: regDst가 1이면 rd = rd, 0이면 rd = rt
   std::bitset<32> aluinput2;
-  CPU::Mux<32>(&m_latch_ID_EX.readData2, &m_latch_ID_EX.immediate, // FIXME
-               &m_latch_ID_EX.ctrlEXALUSrc, &aluinput2);           // EX stage의 두번째 MUX: ALUSrc가 1이면 aluinput2 = immediate, 0이면 aluinput2 = readData2
+  CPU::Mux<32>(&forwarded_rtValue, &m_latch_ID_EX.immediate,
+               &m_latch_ID_EX.ctrlEXALUSrc, &aluinput2); // EX stage의 두번째 MUX: ALUSrc가 1이면 aluinput2 = immediate, 0이면 aluinput2 = forwardedrt
   // branch 공식은 (PC + 4) + offset*4 이므로 sign-extended 값을 shiftleft2
   std::bitset<32> shiftleft2Immediate;
   ShiftLeft2<32>(&m_latch_ID_EX.immediate, &shiftleft2Immediate);
@@ -63,12 +76,12 @@ void PipelinedCPU::Execute()
   std::bitset<4> aluControl;
   ALUControl(&m_latch_ID_EX.ctrlEXALUOp, &funct, &aluControl); // ALU가 어떤 연산을 해야할지 결정하는 signal 생성
   // ALU unit
-  ALU(&m_latch_ID_EX.readData1, &aluinput2, &aluControl,
+  ALU(&forwarded_rsValue, &aluinput2, &aluControl,
       &m_latch_EX_MEM.aluResult, &m_latch_EX_MEM.aluZero); // ALU 연산 결과와 zero signal 생성
   // ADD unit
   Add<32>(&m_latch_ID_EX.pcPlus4, &shiftleft2Immediate, &m_latch_EX_MEM.branchTarget); // branch 했을 때 변경될 branch target 주소 계산
   // Set remaining EX/MEM latch
-  m_latch_EX_MEM.readData2 = m_latch_ID_EX.readData2;
+  m_latch_EX_MEM.readData2 = forwarded_rtValue; // 3-to-1 MUX에서 결정된 값이 이제 readData2 이므로 결정된 값을 EX/MEM latch로 넘겨준다.
   m_latch_EX_MEM.ctrlMEMBranch = m_latch_ID_EX.ctrlMEMBranch;
   m_latch_EX_MEM.ctrlMEMMemRead = m_latch_ID_EX.ctrlMEMMemRead;
   m_latch_EX_MEM.ctrlMEMMemWrite = m_latch_ID_EX.ctrlMEMMemWrite;
@@ -79,6 +92,12 @@ void PipelinedCPU::Execute()
 void PipelinedCPU::MemoryAccess()
 {
   // 4. MemoryAccess
+  // MEM 하기전 EX/MEM latch에 있는 regWrite, rd, rdValue를 forwarding unit에 넘겨준다.
+  m_MEM_to_FwdUnit_regWrite = m_latch_EX_MEM.ctrlWBRegWrite; // 일단 두번째로 실행된 명령이 레지스터에 값을 쓰는 명령이어야 하고,
+  // MEM/WB stage에 있는 두번쨰로 실행된 명령의 rd와 rd에 저장되어 있는 값을 조건이 만족하면 ID/EX stage를 실행중인 명령의 rs나 rt의 값으로 준다.
+  m_MEM_to_FwdUnit_rd = m_latch_EX_MEM.rd;
+  m_MEM_to_FwdUnit_rdValue = m_latch_EX_MEM.aluResult;
+
   // branch를 위한 and gate
   std::bitset<1> PCSrc;                                                   // PCSrc = 1이면 branch, 0이면 PC + 4
   AND<1>(&m_latch_EX_MEM.ctrlMEMBranch, &m_latch_EX_MEM.aluZero, &PCSrc); // PCSrc signal 생성
@@ -104,6 +123,15 @@ void PipelinedCPU::MemoryAccess()
 void PipelinedCPU::WriteBack()
 {
   // 5. WriteBack
+  // WB 하기전 MEM/WB latch에 있는 regWrite, rd, rdValue를 forwarding unit에 넘겨준다.
+  // WB stage에서 미리 하지 않으면 다음에 실행될 MEM stage가 MEM/WB latch 값을 덮어쓰게 되어 이전 Data가 사라지기 때문이다.
+  // 이 과정을 MEM stage 다음에 실행될 가장 최근 명령의 Ex stage에서 한다면 이미 덮어쓰어진 EX/MEM latch의 rd 값이 전달되므로
+  // 제대로 된 forwarding이 불가능
+  m_WB_to_FwdUnit_regWrite = m_latch_MEM_WB.ctrlWBRegWrite; // 일단 가장 먼저 실행된 명령이 레지스터에 값을 쓰는 명령이어야 하고,
+  // MEM/WB stage에 있는 가장 먼저 실행된 명령의 rd와 rd에 저장되어 있는 값을 조건이 만족하면 ID/EX stage를 실행중인 명령의 rs나 rt의 값으로 준다.
+  m_WB_to_FwdUnit_rd = m_latch_MEM_WB.rd;
+  m_WB_to_FwdUnit_rdValue = m_latch_MEM_WB.aluResult;
+
   // Data memory 앞의 MUX에서 WB할 데이터 결정
   std::bitset<32> writeBackData; // RegisterFile로 WB 위해 보낼 데이터
   CPU::Mux<32>(&m_latch_MEM_WB.aluResult, &m_latch_MEM_WB.readData,
@@ -119,9 +147,35 @@ void PipelinedCPU::ForwardingUnit(
     const std::bitset<1> *MEM_WB_regWrite, const std::bitset<5> *MEM_WB_rd,
     std::bitset<2> *forwardA, std::bitset<2> *forwardB)
 {
-  /*****************************/
-  /*********** FIXME ***********/
-  /*****************************/
+  // Forward A
+  if ((m_WB_to_FwdUnit_regWrite == 1 && m_WB_to_FwdUnit_rd != 0) // MEM/WB의 rd를 ID/EX의 rs로 forwarding하는 경우
+      && !(m_MEM_to_FwdUnit_regWrite == 1 && m_MEM_to_FwdUnit_rd != 0 && m_MEM_to_FwdUnit_rd == *ID_EX_rs) && m_WB_to_FwdUnit_rd == *ID_EX_rs)
+  {
+    *forwardA = 0b01;
+  }
+  else if (m_MEM_to_FwdUnit_regWrite == 1 && m_MEM_to_FwdUnit_rd != 0 && m_MEM_to_FwdUnit_rd == *ID_EX_rs)
+  { // EX/MEM의 rd를 ID/EX의 rs로 forwarding하는 경우
+    *forwardA = 0b10;
+  }
+  else
+  { // ID/EX의 rs 값를 그대로 쓰는 경우(forwarding 안하는 경우)
+    *forwardA = 0b00;
+  }
+
+  // Forward B
+  if ((m_WB_to_FwdUnit_regWrite == 1 && m_WB_to_FwdUnit_rd != 0) // MEM/WB의 rd를 ID/EX의 rt로 forwarding하는 경우
+      && !(m_MEM_to_FwdUnit_regWrite == 1 && m_MEM_to_FwdUnit_rd != 0 && m_MEM_to_FwdUnit_rd == *ID_EX_rt) && m_WB_to_FwdUnit_rd == *ID_EX_rt)
+  {
+    *forwardB = 0b01;
+  }
+  else if (m_MEM_to_FwdUnit_regWrite == 1 && m_MEM_to_FwdUnit_rd != 0 && m_MEM_to_FwdUnit_rd == *ID_EX_rt)
+  { // EX/MEM의 rd를 ID/EX의 rt로 forwarding하는 경우
+    *forwardB = 0b10;
+  }
+  else
+  { // ID/EX의 rt 값를 그대로 쓰는 경우(forwarding 안하는 경우)
+    *forwardB = 0b00;
+  }
 }
 
 void PipelinedCPU::HazardDetectionUnit(
