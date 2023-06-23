@@ -4,7 +4,8 @@ SRCS = RegisterFile.cpp Memory.cpp
 all: testPipelinedCPU
 
 testPipelinedCPU: testPipelinedCPU.cpp PipelinedCPU.cpp $(SRCS)
-	g++ -m32 -std=c++11 -o $@ $^
+	g++ -std=c++11 -o $@ $^
+# -m32
 
 .PHONY: clean
 clean:
