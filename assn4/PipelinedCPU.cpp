@@ -137,7 +137,6 @@ void PipelinedCPU::MemoryAccess()
   // 이미 branchtarget = PC + 4 + offset*4인데, 그 값을 그대로 m_PC에 넘겨주면
   // IF stage 전반에서 +4가 또 이루어지므로, branchtarget에 -4를 해줘야 제대로 분기가 작동한다.
   // 과제 4에선 m_MEM_to_IF_PCSrc와 branchTarget 포트가 생겼으므로 Mux의 위치를 if로 옮길 수 있다.
-  // std::bitset<32>realbranchtarget = m_latch_EX_MEM.branchTarget.to_ulong() - 0x04;
 
   // Data memory access
   // memRead, memWrite의 상태에 따라 read할지, write할지, 접근 안할건지 결정
