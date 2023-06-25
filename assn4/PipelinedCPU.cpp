@@ -50,8 +50,6 @@ void PipelinedCPU::InstructionDecode()
                       &m_HazDetUnit_to_IF_PCWrite, &m_HazDetUnit_to_IF_IFIDWrite, &ctrlSelect);
 
   // Decode - Set control signals by opcode, and Set ID/EX latch
-  // FIXME control unit 앞의 mux 구현: ctrlSelect에 따라 if ctrlselect==1 이면 for(std::bitset<n> i : m_latch_ID_EX)  i = 0으로 넣는다.
-  // 아니면 mux 사용
   Control(&opcode, &m_latch_ID_EX.ctrlEXRegDst, &m_latch_ID_EX.ctrlMEMBranch, &m_latch_ID_EX.ctrlMEMMemRead,
           &m_latch_ID_EX.ctrlWBMemToReg, &m_latch_ID_EX.ctrlEXALUOp, &m_latch_ID_EX.ctrlMEMMemWrite,
           &m_latch_ID_EX.ctrlEXALUSrc, &m_latch_ID_EX.ctrlWBRegWrite);
